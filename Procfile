@@ -1,1 +1,1 @@
-web: python tvoyded.py
+web: gunicorn tvoyded:app
