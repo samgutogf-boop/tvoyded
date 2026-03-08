@@ -8,6 +8,8 @@ import sys
 import traceback
 from functools import lru_cache
 from io import BytesIO
+from flask import Flask
+import threading
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application,
@@ -19,7 +21,10 @@ from telegram.ext import (
 )
 
 # ========== КОНФИГУРАЦИЯ ==========
-TOKEN = '8690499757:AAFLZYPfNb6tNlOA1CYrheqOFk9wJMN4GfE'
+TOKEN = os.environ.get('BOT_TOKEN')
+if not TOKEN:
+    print("❌ ОШИБКА: BOT_TOKEN не найден в переменных окружения!")
+    sys.exit(1)
 
 # Пути к папкам
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +47,17 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# ========== ФЛЕСК ЗАГЛУШКА ДЛЯ RENDER ==========
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "🤖 Бот 'Твой Дед' работает! Напиши ему в Telegram: @YourBotUsername"
+
+@app.route('/health')
+def health():
+    return "OK", 200
 
 # ========== НАЗВАНИЯ КАРТИНОК ==========
 PHOTO_FILES = {
@@ -83,32 +99,26 @@ def get_cached_image(image_name):
 
 async def send_photo_optimized(context, chat_id, image_key, caption=None, reply_markup=None):
     """Улучшенная отправка фото с повторными попытками"""
-    
-    # Пробуем отправить фото до 3 раз
     for attempt in range(3):
         try:
             image_name = PHOTO_FILES[image_key]
             image_path = os.path.join(IMAGES_FOLDER, image_name)
             
-            # Проверяем файл
             if not os.path.exists(image_path):
                 logger.error(f"❌ Файл не найден: {image_path}")
                 break
             
-            # Проверяем размер
             file_size = os.path.getsize(image_path)
             if file_size == 0:
                 logger.error(f"❌ Файл пустой: {image_path}")
                 break
             
-            # Читаем файл заново при каждой попытке (не из кэша)
             with open(image_path, 'rb') as f:
                 photo_data = f.read()
                 if len(photo_data) == 0:
                     logger.error(f"❌ Файл прочитан как пустой: {image_name}")
                     continue
                 
-                # Отправляем
                 await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=BytesIO(photo_data),
@@ -123,10 +133,10 @@ async def send_photo_optimized(context, chat_id, image_key, caption=None, reply_
             
         except Exception as e:
             logger.error(f"❌ Ошибка отправки {image_key} (попытка {attempt+1}): {e}")
-            if attempt < 2:  # Если не последняя попытка
-                await asyncio.sleep(1)  # Ждём 1 секунду перед повтором
+            if attempt < 2:
+                import asyncio
+                await asyncio.sleep(1)
             else:
-                # Отправляем только текст
                 if caption:
                     await context.bot.send_message(chat_id=chat_id, text=caption, reply_markup=reply_markup)
                 return False
@@ -236,8 +246,6 @@ def init_db():
     """Инициализация БД со ВСЕМИ нужными колонками"""
     with get_db_connection() as conn:
         c = conn.cursor()
-        
-        # Создаём таблицу со всеми колонками
         c.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -263,12 +271,9 @@ def init_db():
             )
         ''')
         conn.commit()
-        
-        # Проверяем, что все колонки существуют
         c.execute("PRAGMA table_info(users)")
         columns = [col[1] for col in c.fetchall()]
         
-        # Если какой-то колонки нет, добавляем
         required_columns = ['today_water_ml', 'last_water_reset']
         for col in required_columns:
             if col not in columns:
@@ -277,12 +282,10 @@ def init_db():
                     logger.info(f"✅ Добавлена колонка {col}")
                 except:
                     pass
-        
         conn.commit()
     
     logger.info("✅ База данных готова")
 
-# Инициализация при запуске
 init_db()
 
 def get_user_data(user_id: int) -> dict:
@@ -293,11 +296,9 @@ def get_user_data(user_id: int) -> dict:
         row = c.fetchone()
         
         if row:
-            # Получаем названия колонок
             c.execute("PRAGMA table_info(users)")
             columns = [col[1] for col in c.fetchall()]
             
-            # Создаём словарь с данными
             data = {}
             for i, col in enumerate(columns):
                 if i < len(row):
@@ -315,7 +316,6 @@ def get_user_data(user_id: int) -> dict:
                         data[col] = row[i]
             return data
     
-    # Если пользователя нет — создаём
     now = datetime.datetime.now()
     default = {
         'user_id': user_id,
@@ -346,12 +346,9 @@ def save_user_data(user_id: int, data: dict):
     """Сохранение данных пользователя"""
     with get_db_connection() as conn:
         c = conn.cursor()
-        
-        # Получаем список колонок
         c.execute("PRAGMA table_info(users)")
         columns = [col[1] for col in c.fetchall()]
         
-        # Подготавливаем значения
         values = []
         for col in columns:
             if col in data:
@@ -365,7 +362,6 @@ def save_user_data(user_id: int, data: dict):
             else:
                 values.append(None)
         
-        # Формируем запрос
         placeholders = ','.join(['?' for _ in columns])
         c.execute(f'''
             INSERT OR REPLACE INTO users ({','.join(columns)})
@@ -402,7 +398,6 @@ def get_water_norm(user_data):
         return 2000
     
     weight = user_data['weight']
-    # Простая формула: вес * 30 мл
     norm = weight * 30
     return max(1500, min(4000, int(norm)))
 
@@ -417,7 +412,6 @@ def check_achievements(user_id: int, user_data: dict):
             except:
                 current_achievements = []
         
-        # Проверяем каждое достижение
         if 'water_first' not in current_achievements and user_data.get('total_water_drinks', 0) > 0:
             new_achievements.append('water_first')
         
@@ -442,7 +436,6 @@ def check_achievements(user_id: int, user_data: dict):
                 if days >= 30:
                     new_achievements.append('veteran')
         
-        # Если есть новые достижения, сохраняем
         if new_achievements:
             user_data['achievements'] = current_achievements + new_achievements
             save_user_data(user_id, user_data)
@@ -480,9 +473,7 @@ async def wake_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         user_data['total_sleeps'] = user_data.get('total_sleeps', 0) + 1
         user_data['sleep_start'] = None
         
-        # Проверяем достижения
         new_achievements = check_achievements(user_id, user_data)
-        
         save_user_data(user_id, user_data)
 
         total_hours = user_data['total_sleep_seconds'] // 3600
@@ -491,7 +482,6 @@ async def wake_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         msg = f"🌅 Проснулся! Спал {hours} ч {minutes} мин\n📊 Всего сна: {total_hours} ч {total_min} мин"
         await update.message.reply_text(msg)
         
-        # Если есть новые достижения, показываем
         if new_achievements:
             achiev_msg = "🎉 НОВЫЕ ДОСТИЖЕНИЯ!\n\n"
             for ach in new_achievements:
@@ -508,7 +498,7 @@ async def wake_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         await update.message.reply_text("❓ Ты и не ложился ещё!")
 
-# ========== ОБРАБОТЧИКИ ==========
+# ========== ОСНОВНЫЕ ОБРАБОТЧИКИ ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработка команды /start"""
     user_id = update.effective_user.id
@@ -822,7 +812,6 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             
             msg = "🏆 ТВОИ ДОСТИЖЕНИЯ\n\n"
             
-            # Сначала показываем полученные
             if achievements:
                 msg += "✅ ПОЛУЧЕННЫЕ:\n"
                 for ach in achievements:
@@ -830,7 +819,6 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                         msg += f"  {ACHIEVEMENTS[ach]['emoji']} {ACHIEVEMENTS[ach]['name']}\n"
                 msg += "\n"
             
-            # Показываем все доступные
             msg += "📋 ДОСТУПНЫЕ ДОСТИЖЕНИЯ:\n"
             for key, ach in ACHIEVEMENTS.items():
                 if key not in achievements:
@@ -873,7 +861,6 @@ async def handle_water_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.user_data['awaiting_water'] = False
             return True
         
-        # Преобразуем today_water_ml в число, если оно строка
         today_water = user_data.get('today_water_ml', 0)
         if isinstance(today_water, str):
             try:
@@ -881,12 +868,10 @@ async def handle_water_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except:
                 today_water = 0
         
-        # Обновляем статистику
         user_data['today_water_ml'] = today_water + water_ml
         user_data['total_water_drinks'] = user_data.get('total_water_drinks', 0) + 1
         user_data['last_water'] = datetime.datetime.now()
         
-        # Обновляем streak
         today = datetime.datetime.now().date()
         last_date = user_data.get('last_water_date')
         if last_date:
@@ -909,12 +894,9 @@ async def handle_water_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         user_data['last_water_date'] = datetime.datetime.now()
         
-        # Проверяем достижения
         new_achievements = check_achievements(user_id, user_data)
-        
         save_user_data(user_id, user_data)
         
-        # Проверяем норму
         water_norm = get_water_norm(user_data)
         today_total = user_data['today_water_ml']
         
@@ -925,7 +907,6 @@ async def handle_water_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         await update.message.reply_text(msg)
         
-        # Если есть новые достижения, показываем
         if new_achievements:
             achiev_msg = "🎉 НОВЫЕ ДОСТИЖЕНИЯ!\n\n"
             for ach in new_achievements:
@@ -933,7 +914,6 @@ async def handle_water_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     achiev_msg += f"{ACHIEVEMENTS[ach]['emoji']} {ACHIEVEMENTS[ach]['name']}\n"
             await update.message.reply_text(achiev_msg)
         
-        # Отправляем мотивацию
         advice = random.choice(DEDS_ADVICE)
         await send_photo_optimized(
             context,
@@ -967,7 +947,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     now = datetime.datetime.now()
 
     try:
-        # КНОПКА ПРОСНУЛСЯ
         if query.data == 'woke_up':
             if user_data.get('sleep_start'):
                 sleep_start = user_data['sleep_start']
@@ -985,9 +964,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 user_data['total_sleeps'] = user_data.get('total_sleeps', 0) + 1
                 user_data['sleep_start'] = None
                 
-                # Проверяем достижения
                 new_achievements = check_achievements(user_id, user_data)
-                
                 save_user_data(user_id, user_data)
 
                 total_hours = user_data['total_sleep_seconds'] // 3600
@@ -995,13 +972,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
                 msg = f"🌅 Проснулся! Спал {hours} ч {minutes} мин\n📊 Всего сна: {total_hours} ч {total_min} мин"
                 
-                # Отправляем новое сообщение вместо редактирования
                 await context.bot.send_message(
                     chat_id=update.effective_chat.id,
                     text=msg
                 )
                 
-                # Если есть новые достижения, показываем
                 if new_achievements:
                     achiev_msg = "🎉 НОВЫЕ ДОСТИЖЕНИЯ!\n\n"
                     for ach in new_achievements:
@@ -1024,9 +999,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     text="❓ Ты и не ложился ещё!"
                 )
 
-        # КНОПКИ ПЛАНОВ ТРЕНИРОВОК
         elif query.data in ['plan_beginner', 'plan_intermediate', 'plan_advanced']:
-            # Определяем уровень
             if query.data == 'plan_beginner':
                 plan = TRAINING_PLANS['beginner']
             elif query.data == 'plan_intermediate':
@@ -1041,20 +1014,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             
             keyboard = [[InlineKeyboardButton("✅ Завершил тренировку", callback_data='workout_done')]]
             
-            # Отправляем новое сообщение
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=msg,
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
 
-        # КНОПКА ТРЕНИРОВКА ВЫПОЛНЕНА
         elif query.data == 'workout_done':
             user_data['workouts_done'] = user_data.get('workouts_done', 0) + 1
             
-            # Проверяем достижения
             new_achievements = check_achievements(user_id, user_data)
-            
             save_user_data(user_id, user_data)
             
             await context.bot.send_message(
@@ -1062,7 +1031,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 text="✅ Отлично потренировался!"
             )
             
-            # Если есть новые достижения, показываем
             if new_achievements:
                 achiev_msg = "🎉 НОВЫЕ ДОСТИЖЕНИЯ!\n\n"
                 for ach in new_achievements:
@@ -1080,7 +1048,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"💬 {random.choice(DEDS_ADVICE)}"
             )
 
-        # КНОПКА ПОДПИСКИ
         elif query.data == 'subscription':
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
@@ -1128,7 +1095,6 @@ async def hourly_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Главный обработчик текста"""
-    # Сначала проверяем, не ввод ли это количества воды
     if await handle_water_input(update, context):
         return
     
@@ -1140,8 +1106,29 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await handle_menu(update, context)
 
+# ========== ФУНКЦИЯ ЗАПУСКА БОТА ==========
+def run_bot():
+    """Запускает Telegram бота в отдельном потоке"""
+    try:
+        application = Application.builder().token(TOKEN).build()
+
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("wake", wake_command))
+        application.add_handler(CallbackQueryHandler(setup_callback, pattern=r'^(gender|weight|height)_'))
+        application.add_handler(CallbackQueryHandler(button_handler))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
+
+        application.job_queue.run_repeating(hourly_reminder, interval=3600, first=60)
+
+        print("✅ Бот запущен! Нажми Ctrl+C для остановки")
+        application.run_polling()
+        
+    except Exception as e:
+        print(f"\n❌ ОШИБКА ЗАПУСКА: {e}")
+        traceback.print_exc()
+
 # ========== ЗАПУСК ==========
-def main():
+if __name__ == '__main__':
     print("="*60)
     print("🚀 ЗАПУСК БОТА «ТВОЙ ДЕД»")
     print("="*60)
@@ -1158,28 +1145,12 @@ def main():
             print(f"❌ {filename} не найден!")
     
     print("="*60)
-
-    try:
-        application = Application.builder().token(TOKEN).build()
-
-        # Обработчики
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("wake", wake_command))
-        application.add_handler(CallbackQueryHandler(setup_callback, pattern=r'^(gender|weight|height)_'))
-        application.add_handler(CallbackQueryHandler(button_handler))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
-
-        # Планировщик напоминаний (каждый час)
-        application.job_queue.run_repeating(hourly_reminder, interval=3600, first=60)
-
-        print("\n✅ Бот успешно запущен! Нажми Ctrl+C для остановки")
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-    except Exception as e:
-        print(f"\n❌ ОШИБКА ЗАПУСКА: {e}")
-        traceback.print_exc()
-        print("\nНажми Enter для выхода...")
-        input()
-
-if __name__ == '__main__':
-    main()
+    
+    # Запускаем бота в отдельном потоке
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    # Запускаем Flask сервер для Render
+    port = int(os.environ.get('PORT', 5000))
+    print(f"🌐 Flask сервер запущен на порту {port}")
+    app.run(host='0.0.0.0', port=port)
